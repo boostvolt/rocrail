@@ -1,0 +1,47 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Documentation
+README.md
+LICENSE
+*.md
+
+# Scripts (not needed in container)
+rocker.sh
+scripts/deploy.sh
+
+# Environment files
+.env
+env.example
+
+# Docker files
+docker-compose.yml
+.dockerignore
+Dockerfile
+
+# Logs and temporary files
+logs/
+*.log
+*.tmp
+
+# Backup files
+backups/
+*.tar.gz
+*.zip
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+test/
+tests/
+*.test

@@ -1,0 +1,176 @@
+name: Docker Image CI/CD
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  schedule:
+    # Check for new versions daily at 2 AM UTC
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "RocRail version to build (leave empty for latest)"
+        required: false
+        type: string
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: boostvolt/rocrail
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      latest-version: ${{ steps.get-version.outputs.version }}
+      should-build: ${{ steps.check-version.outputs.should-build }}
+    steps:
+      - name: Get latest RocRail version
+        id: get-version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "Using manually specified version: ${{ github.event.inputs.version }}"
+          else
+            echo "Checking for latest RocRail version..."
+            # Check for latest version by testing download URLs
+            # Start from a reasonable range and work backwards
+            LATEST_VERSION=""
+            for version in $(seq 5900 -1 5800); do
+              if curl -s -I "https://wiki.rocrail.net/rocrail-snapshot/history/Rocrail-${version}-debian11-i64.zip" | grep -q "200"; then
+                LATEST_VERSION=$version
+                break
+              fi
+            done
+            
+            if [ -z "$LATEST_VERSION" ]; then
+              echo "Error: Could not find latest version"
+              exit 1
+            fi
+            
+            echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+            echo "Latest version found: $LATEST_VERSION"
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check if we need to build
+        id: check-version
+        run: |
+          # Get current version from env.example
+          CURRENT_VERSION=$(grep 'ROCRAIL_VERSION=' env.example | cut -d'=' -f2)
+          LATEST_VERSION="${{ steps.get-version.outputs.version }}"
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "Latest version: $LATEST_VERSION"
+
+          if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+            echo "should-build=true" >> $GITHUB_OUTPUT
+            echo "New version available: $LATEST_VERSION"
+          else
+            echo "should-build=false" >> $GITHUB_OUTPUT
+            echo "No new version available"
+          fi
+
+  build-and-push:
+    needs: check-version
+    if: needs.check-version.outputs.should-build == 'true' || github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ needs.check-version.outputs.latest-version }},enable={{is_default_branch}}
+            type=raw,value=${{ needs.check-version.outputs.latest-version }}-${{ matrix.platform }},enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            ROCRAIL_VERSION=${{ needs.check-version.outputs.latest-version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  create-release:
+    needs: [check-version, build-and-push]
+    if: needs.check-version.outputs.should-build == 'true' && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ needs.check-version.outputs.latest-version }}
+          release_name: RocRail Docker v${{ needs.check-version.outputs.latest-version }}
+          body: |
+            ## RocRail Docker Image v${{ needs.check-version.outputs.latest-version }}
+
+            Automated release with latest RocRail version.
+
+            ### Docker Images
+            - `docker.io/boostvolt/rocrail:latest` (latest)
+            - `docker.io/boostvolt/rocrail:${{ needs.check-version.outputs.latest-version }}` (versioned)
+            - `docker.io/boostvolt/rocrail:${{ needs.check-version.outputs.latest-version }}-linux/amd64` (x86_64)
+            - `docker.io/boostvolt/rocrail:${{ needs.check-version.outputs.latest-version }}-linux/arm64` (ARM64)
+
+            ### Usage
+            ```bash
+            docker pull docker.io/boostvolt/rocrail:${{ needs.check-version.outputs.latest-version }}
+            ```
+          draft: false
+          prerelease: false
+
+  update-version:
+    needs: [check-version, create-release]
+    if: needs.check-version.outputs.should-build == 'true' && github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update version in env.example
+        run: |
+          sed -i "s/ROCRAIL_VERSION=.*/ROCRAIL_VERSION=${{ needs.check-version.outputs.latest-version }}/" env.example
+
+      - name: Commit and push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add env.example
+          git commit -m "Update to RocRail v${{ needs.check-version.outputs.latest-version }}"
+          git push

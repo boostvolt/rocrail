@@ -1,0 +1,47 @@
+services:
+  rocrail:
+    build:
+      context: .
+      args:
+        ROCRAIL_VERSION: ${ROCRAIL_VERSION:-5819}
+    container_name: rocrail-server
+    restart: unless-stopped
+    platform: ${PLATFORM:-linux/amd64}
+    ports:
+      - "${SRCP_PORT:-4303}:4303"
+      - "${ROCRAIL_PORT:-8051}:8051"
+      - "${ROCRAIL_PORT:-8051}:8051/udp"
+      - "${ROCWEB_PORT:-8088}:8088"
+      - "${SNMP_PORT:-161}:161/tcp"
+      - "${SNMP_PORT:-161}:161/udp"
+    volumes:
+      - rocrail_data:/rocrail
+      - rocrail_config:/rocrail/config
+      - rocrail_logs:/rocrail/logs
+    environment:
+      - ROCRAIL_DATA=/rocrail
+      - ROCRAIL_CONFIG=/rocrail/config
+      - ROCRAIL_LOGS=/rocrail/logs
+      - TZ=${TZ:-Europe/Berlin}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/health-check.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: ${DOCKER_MEMORY_LIMIT:-1G}
+          cpus: ${DOCKER_CPU_LIMIT:-1.0}
+        reservations:
+          memory: 512M
+          cpus: "0.5"
+
+volumes:
+  rocrail_data:
+    driver: local
+  rocrail_config:
+    driver: local
+  rocrail_logs:
+    driver: local
